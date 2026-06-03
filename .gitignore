@@ -1,0 +1,28 @@
+# Compiled cairn-ingest binary (root-anchored so it does not match the
+# cmd/cairn-ingest/ source directory)
+/cairn-ingest
+/cairn-ingest.exe
+
+# Block store directories (Badger + FS backends) and scratch/test stores
+/store/
+/store-*/
+/cairn-store/
+*-store/
+**/testdata-store/
+
+# Badger on-disk artifacts (in case a store lives outside the dirs above)
+*.db
+*.sst
+*.vlog
+*.mem
+MANIFEST
+KEYREGISTRY
+DISCARD
+LOCK
+
+# Demo / scratch input data
+/demo-data/
+
+# OS junk
+.DS_Store
+Thumbs.db
