@@ -9,7 +9,12 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/testcontainers/testcontainers-go v0.42.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
+	github.com/vkizim/cairn/web v0.0.0
 )
+
+// The frontend lives in a nested module so `./...` skips web/node_modules; it is
+// resolved locally (built from source, embedded with -tags embed_spa).
+replace github.com/vkizim/cairn/web => ./web
 
 require (
 	dario.cat/mergo v1.0.2 // indirect

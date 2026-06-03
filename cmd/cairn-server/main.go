@@ -34,6 +34,7 @@ import (
 	"github.com/vkizim/cairn/api"
 	"github.com/vkizim/cairn/blockstore"
 	"github.com/vkizim/cairn/repo"
+	"github.com/vkizim/cairn/web"
 )
 
 // newFlagSet binds CLI flags onto cfg, using the env-derived values as defaults
@@ -112,7 +113,12 @@ func cmdServe(cfg config) error {
 	}
 	defer db.Close()
 
-	srv, err := api.NewServer(db, store, api.Config{Dev: cfg.dev})
+	apiCfg := api.Config{Dev: cfg.dev}
+	if fsys, ok := web.FS(); ok {
+		apiCfg.Static = api.SPAFileServer(fsys)
+		fmt.Println("serving embedded SPA")
+	}
+	srv, err := api.NewServer(db, store, apiCfg)
 	if err != nil {
 		return err
 	}

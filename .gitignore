@@ -26,6 +26,11 @@ LOCK
 # Demo / scratch input data
 /demo-data/
 
+# Frontend (web/) — node deps and generated build output (built locally/CI,
+# embedded into the binary with -tags embed_spa; not committed)
+web/node_modules/
+web/dist/
+
 # Local secrets / configuration
 .env
 .env.local

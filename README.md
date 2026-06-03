@@ -11,8 +11,11 @@ Content-addressable file storage in the spirit of Seafile.
 - **Step 3** — the HTTP API: cookie-session auth (argon2id), CSRF protection, an
   owner-only access seam, REST/JSON metadata endpoints, file download with HTTP
   Range, and a resumable upload protocol — served by `cmd/cairn-server`.
+- **Step 4a** — the web UI shell (`web/`): a Vite + React + TypeScript SPA
+  (login → libraries → virtualized file manager → download), embedded into the
+  binary. Upload and history/rollback come in 4b.
 
-No frontend or encryption yet.
+No encryption yet.
 
 ## Packages
 
@@ -25,7 +28,8 @@ No frontend or encryption yet.
 | `api`              | HTTP layer: session auth, CSRF, access middleware, library/file/upload endpoints (stdlib `net/http`). |
 | `cmd/cairn-ingest` | Step-1 CLI: ingest a file/dir and report dedup ratios.                     |
 | `cmd/cairn-fs`     | Step-2 demo CLI: create libraries, commit, list, log, fsck.                |
-| `cmd/cairn-server` | Step-3 server: `serve`, `create-user`, `sweep-uploads`.                    |
+| `cmd/cairn-server` | Step-3 server: `serve`, `create-user`, `sweep-uploads`; serves the embedded SPA. |
+| `web/`             | Step-4a SPA (Vite + React + TS); nested Go module that embeds `web/dist`.   |
 
 ## Quick start (step 1 — no database)
 
@@ -267,5 +271,56 @@ traversal, separators, control chars, over-long names).
 
 - Login **rate-limiting / brute-force protection** is out of scope for this step
   (tracked as a TODO in `auth.go`).
-- A static-SPA fall-through hook exists in `server.go` for step 4; no frontend
-  assets are bundled yet.
+- The `server.go` static fall-through now serves the embedded SPA (step 4a).
+
+## Step 4a — the web UI (`web/`)
+
+A Vite + React + TypeScript SPA: **login → libraries → file manager (virtualized
+directory listing) → download**. (Upload and history/rollback are step 4b.)
+Stack: TanStack Query + TanStack Virtual, Tailwind v4, react-router, hand-rolled
+components.
+
+### Dev (hot reload, two processes)
+
+```sh
+# 1) backend with dev cookies (Secure relaxed for http://localhost)
+CAIRN_DEV=1 go run ./cmd/cairn-server -addr :8080
+
+# 2) Vite dev server on :5173, proxying /api → :8080 (same-origin cookies)
+cd web && npm install && npm run dev
+```
+Open http://localhost:5173. The proxy keeps the session/CSRF cookies same-origin.
+
+### Prod (embed into the binary)
+
+```sh
+cd web && npm install && npm run build      # → web/dist
+cd .. && go build -tags embed_spa -o cairn-server ./cmd/cairn-server
+CAIRN_DEV=1 ./cairn-server -addr :8080       # serves SPA + API on one origin
+```
+Open http://localhost:8080. Unknown non-`/api` paths fall back to `index.html`
+so client-side routing survives refresh and deep links.
+
+### How it's wired
+
+- **Embed via build tag.** `web/embed_spa.go` (`//go:build embed_spa`) embeds
+  `web/dist`; `web/embed_nospa.go` is the default no-op, so plain `go build ./...`
+  / `go test ./...` compile **without** needing `web/dist`. Only
+  `go build -tags embed_spa` embeds the SPA. `cmd/cairn-server` wires
+  `web.FS()` into `api.Config.Static` via `api.SPAFileServer`.
+- **`web/` is a nested Go module** (`web/go.mod`, resolved by a `replace` in the
+  root `go.mod`) so the root module's `./...` never descends into
+  `web/node_modules`.
+- **API client** (`web/src/api/client.ts`) sends cookies (`credentials: include`)
+  and attaches the `X-CSRF-Token` header (read from the `cairn_csrf` cookie) on
+  every mutating request — centralized so no call site forgets. A 401 clears
+  caches and routes to login. The session token is never read by JS.
+- **Paths** (`web/src/lib/vpath.ts`) are encoded/decoded **per segment** so names
+  with spaces, Cyrillic, or `# ? % &` round-trip losslessly between the route
+  splat, breadcrumb, and the API `?path=` (covered by `vpath.test.ts`).
+
+### Frontend tooling
+
+TypeScript strict; `npm run lint` (eslint flat config), `npm run format`
+(prettier), `npm run test` (vitest). `web/node_modules` and `web/dist` are
+gitignored — build locally or in CI; `dist` is not committed.
