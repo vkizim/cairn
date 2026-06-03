@@ -1,7 +1,10 @@
-# Compiled cairn-ingest binary (root-anchored so it does not match the
-# cmd/cairn-ingest/ source directory)
+# Compiled binaries (root-anchored so they do not match the cmd/<name>/ source dirs)
 /cairn-ingest
 /cairn-ingest.exe
+/cairn-fs
+/cairn-fs.exe
+/cairn-server
+/cairn-server.exe
 
 # Block store directories (Badger + FS backends) and scratch/test stores
 /store/
@@ -22,6 +25,10 @@ LOCK
 
 # Demo / scratch input data
 /demo-data/
+
+# Local secrets / configuration
+.env
+.env.local
 
 # OS junk
 .DS_Store

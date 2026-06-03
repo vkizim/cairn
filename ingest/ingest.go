@@ -62,13 +62,18 @@ func (s Stats) SavedFraction() float64 {
 	return 1 - float64(s.PhysicalNewBytes)/float64(s.LogicalBytes)
 }
 
-// Ingest streams r through the chunker, stores each resulting block under the
-// given namespace (deduping globally), increments each block's refcount, and
-// returns the manifest and stats. It never buffers the whole stream.
+// Build streams r through the chunker and stores each resulting block under the
+// given namespace (deduping globally), returning the manifest and stats. It
+// never buffers the whole stream.
 //
-// On the first error (read, store, or refcount) it stops and returns that
-// error along with the partial manifest/stats accumulated so far.
-func Ingest(store blockstore.Store, namespace string, r io.Reader, name string) (Manifest, Stats, error) {
+// Unlike Ingest, Build does NOT touch the block store's in-store refcount: as of
+// step 2 the authoritative refcount lives in Postgres (see package repo, the
+// blocks table), updated transactionally with the commit. Build only needs to
+// write block bytes, so it takes a BlockStore rather than the full Store.
+//
+// On the first error (read or store) it stops and returns that error along with
+// the partial manifest/stats accumulated so far.
+func Build(store blockstore.BlockStore, namespace string, r io.Reader, name string) (Manifest, Stats, error) {
 	m := Manifest{Name: name}
 	var stats Stats
 	unique := make(map[blockstore.Hash]struct{})
@@ -78,18 +83,13 @@ func Ingest(store blockstore.Store, namespace string, r io.Reader, name string) 
 		if err != nil {
 			return err
 		}
-		if _, err := store.Incr(namespace, ck.Hash); err != nil {
-			return err
-		}
 
 		stats.LogicalBytes += uint64(ck.Length)
 		stats.TotalBlocks++
 		if isNew {
 			stats.PhysicalNewBytes += uint64(ck.Length)
 		}
-		if _, seen := unique[ck.Hash]; !seen {
-			unique[ck.Hash] = struct{}{}
-		}
+		unique[ck.Hash] = struct{}{}
 
 		m.Blocks = append(m.Blocks, BlockRef{Hash: ck.Hash, Size: ck.Length})
 		return nil
@@ -98,4 +98,24 @@ func Ingest(store blockstore.Store, namespace string, r io.Reader, name string) 
 	m.TotalSize = stats.LogicalBytes
 	stats.UniqueBlocks = len(unique)
 	return m, stats, err
+}
+
+// Ingest is the step-1 entry point: it Builds the manifest (writing blocks) and
+// then increments the block store's in-store refcount once per block reference.
+//
+// Deprecated: the in-store refcount is no longer authoritative — Postgres owns
+// it as of step 2 (see package repo). Ingest is retained for the standalone
+// cmd/cairn-ingest dedup demo; new code should use Build and let repo manage
+// refcounts transactionally.
+func Ingest(store blockstore.Store, namespace string, r io.Reader, name string) (Manifest, Stats, error) {
+	m, stats, err := Build(store, namespace, r, name)
+	if err != nil {
+		return m, stats, err
+	}
+	for _, b := range m.Blocks {
+		if _, err := store.Incr(namespace, b.Hash); err != nil {
+			return m, stats, err
+		}
+	}
+	return m, stats, nil
 }
