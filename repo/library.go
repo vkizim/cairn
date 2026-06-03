@@ -14,12 +14,13 @@ import (
 // ErrNotFound is returned when a library or commit does not exist.
 var ErrNotFound = errors.New("repo: not found")
 
-// CreateLibrary inserts a new, empty library (no commits, nil head).
-func (db *DB) CreateLibrary(ctx context.Context, name, owner string) (Library, error) {
-	lib := Library{ID: uuid.New(), Name: name, Owner: owner}
+// CreateLibrary inserts a new, empty library (no commits, nil head) owned by the
+// given user.
+func (db *DB) CreateLibrary(ctx context.Context, name string, ownerID uuid.UUID) (Library, error) {
+	lib := Library{ID: uuid.New(), Name: name, OwnerID: ownerID}
 	err := db.pool.QueryRow(ctx,
-		`INSERT INTO libraries (id, name, owner) VALUES ($1, $2, $3) RETURNING created_at`,
-		lib.ID, lib.Name, lib.Owner,
+		`INSERT INTO libraries (id, name, owner_id) VALUES ($1, $2, $3) RETURNING created_at`,
+		lib.ID, lib.Name, lib.OwnerID,
 	).Scan(&lib.CreatedAt)
 	if err != nil {
 		return Library{}, fmt.Errorf("repo: create library: %w", err)
@@ -30,8 +31,29 @@ func (db *DB) CreateLibrary(ctx context.Context, name, owner string) (Library, e
 // GetLibrary loads a library by id.
 func (db *DB) GetLibrary(ctx context.Context, id uuid.UUID) (Library, error) {
 	return scanLibrary(db.pool.QueryRow(ctx, `
-		SELECT id, name, owner, head_commit_hash, encrypted, created_at
+		SELECT id, name, owner_id, head_commit_hash, encrypted, created_at
 		FROM libraries WHERE id = $1`, id))
+}
+
+// ListLibrariesByOwner returns the libraries owned by a user, oldest first.
+func (db *DB) ListLibrariesByOwner(ctx context.Context, ownerID uuid.UUID) ([]Library, error) {
+	rows, err := db.pool.Query(ctx, `
+		SELECT id, name, owner_id, head_commit_hash, encrypted, created_at
+		FROM libraries WHERE owner_id = $1 ORDER BY created_at`, ownerID)
+	if err != nil {
+		return nil, fmt.Errorf("repo: list libraries: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Library
+	for rows.Next() {
+		lib, err := scanLibrary(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, lib)
+	}
+	return out, rows.Err()
 }
 
 type rowScanner interface {
@@ -43,7 +65,7 @@ func scanLibrary(row rowScanner) (Library, error) {
 		lib  Library
 		head *string
 	)
-	err := row.Scan(&lib.ID, &lib.Name, &lib.Owner, &head, &lib.Encrypted, &lib.CreatedAt)
+	err := row.Scan(&lib.ID, &lib.Name, &lib.OwnerID, &head, &lib.Encrypted, &lib.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Library{}, ErrNotFound
 	}

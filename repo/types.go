@@ -11,7 +11,7 @@ import (
 type Library struct {
 	ID         uuid.UUID
 	Name       string
-	Owner      string
+	OwnerID    uuid.UUID // FK to users.id (step 3)
 	HeadCommit *blockstore.Hash // nil when the library has no commits yet
 	Encrypted  bool
 	CreatedAt  time.Time

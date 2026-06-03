@@ -15,7 +15,12 @@ func strReader(s string) io.Reader { return strings.NewReader(s) }
 
 func mustLibrary(t *testing.T, db *DB) Library {
 	t.Helper()
-	lib, err := db.CreateLibrary(context.Background(), "lib", "owner")
+	// Libraries now require an owner user (step 3). Create a throwaway one.
+	u, err := db.CreateUser(context.Background(), "user-"+uuid.NewString(), "x")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	lib, err := db.CreateLibrary(context.Background(), "lib", u.ID)
 	if err != nil {
 		t.Fatalf("CreateLibrary: %v", err)
 	}

@@ -3,6 +3,8 @@
 /cairn-ingest.exe
 /cairn-fs
 /cairn-fs.exe
+/cairn-server
+/cairn-server.exe
 
 # Block store directories (Badger + FS backends) and scratch/test stores
 /store/

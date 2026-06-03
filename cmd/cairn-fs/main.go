@@ -118,9 +118,14 @@ func openStore(backend, path string) (blockstore.Store, error) {
 
 func cmdCreateLibrary(ctx context.Context, db *repo.DB, args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("create-library <name> <owner>")
+		return fmt.Errorf("create-library <name> <owner-username>")
 	}
-	lib, err := db.CreateLibrary(ctx, args[0], args[1])
+	// The owner must be an existing user (create one via `cairn-server create-user`).
+	owner, err := db.GetUserByUsername(ctx, args[1])
+	if err != nil {
+		return fmt.Errorf("owner %q: %w (create the user first via cairn-server create-user)", args[1], err)
+	}
+	lib, err := db.CreateLibrary(ctx, args[0], owner.ID)
 	if err != nil {
 		return err
 	}

@@ -60,6 +60,14 @@ func Open(ctx context.Context, url string, store blockstore.Store) (*DB, error) 
 	return fromPool(pool, store), nil
 }
 
+// OpenPool builds a DB around an already-open pgx pool and block store, without
+// running migrations (call Migrate first if the schema is empty). It's intended
+// for callers — notably tests — that manage their own connection/schema, e.g. a
+// pool with a per-test search_path.
+func OpenPool(pool *pgxpool.Pool, store blockstore.Store) *DB {
+	return fromPool(pool, store)
+}
+
 // fromPool builds a DB around an already-open pool (used by Open and by tests
 // that manage their own schema-isolated pool).
 func fromPool(pool *pgxpool.Pool, store blockstore.Store) *DB {
