@@ -12,7 +12,7 @@ export function Layout({ children }: { children: ReactNode }) {
     <div className="flex h-full flex-col">
       <header className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3">
         <Link to="/libraries" className="flex items-center gap-2 text-lg font-semibold tracking-tight">
-          <img src="/logo.png" alt="" className="h-8 w-8" />
+          <img src="/logo.png" alt="" className="-my-2 h-12 w-12" />
           Cairn
         </Link>
         <div className="flex items-center gap-3">
