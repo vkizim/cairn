@@ -32,7 +32,10 @@ export function LoginPage() {
         onSubmit={onSubmit}
         className="w-full max-w-sm space-y-4 rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
       >
-        <h1 className="text-xl font-semibold">Sign in to Cairn</h1>
+        <div className="flex justify-center">
+          <img src="/logo.png" alt="Cairn" className="h-28 w-28 rounded-2xl shadow-md" />
+        </div>
+        <h1 className="text-center text-xl font-semibold">Sign in to Cairn</h1>
 
         <label className="block space-y-1">
           <span className="text-sm text-slate-600">Username</span>
