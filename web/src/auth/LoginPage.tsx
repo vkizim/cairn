@@ -33,7 +33,7 @@ export function LoginPage() {
         className="w-full max-w-sm space-y-4 rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
       >
         <div className="flex justify-center">
-          <img src="/logo.png" alt="Cairn" className="h-28 w-28 rounded-2xl shadow-md" />
+          <img src="/logo.png" alt="Cairn" className="h-32 w-32" />
         </div>
         <h1 className="text-center text-xl font-semibold">Sign in to Cairn</h1>
 
