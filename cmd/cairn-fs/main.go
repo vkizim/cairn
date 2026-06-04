@@ -8,8 +8,8 @@
 // Flags (must precede the subcommand):
 //
 //	-db      Postgres DSN (default: $CAIRN_TEST_DATABASE_URL, or from .env)
-//	-store   block store directory (default ./cairn-store)
-//	-backend block store backend: badger|fs (default badger)
+//	-store   block store directory (default ./cairn-store; used by `commit` only)
+//	-backend block store backend: badger|fs (default badger; used by `commit` only)
 //
 // Subcommands:
 //
@@ -18,6 +18,11 @@
 //	ls <library-id> [path]          list a directory from path_index (default /)
 //	log <library-id>                print commit history (newest first)
 //	fsck <library-id>               verify the library and print a report
+//
+// Only `commit` opens the block store (it writes blocks); the other subcommands
+// are metadata-only and need just Postgres. For `commit`, Badger is opened with
+// the lock guard bypassed — fine for this single-user CLI, but do not point it
+// at a store directory a running cairn-server is actively using.
 package main
 
 import (
@@ -58,14 +63,26 @@ func run() error {
 		return fmt.Errorf("no database configured: pass -db or set CAIRN_TEST_DATABASE_URL (e.g. in .env)")
 	}
 
-	store, err := openStore(*backend, *storePath)
-	if err != nil {
-		return err
+	// Only `commit` writes blocks; every other subcommand (create-library, ls,
+	// log, fsck) is metadata-only and talks just to Postgres, so the block store
+	// is not opened at all for them. This sidesteps Badger's directory LOCK for
+	// read-only use — on Windows a concurrent cairn-server (or an orphaned
+	// `go run` child surviving a Ctrl-C) holding ./cairn-store would otherwise
+	// fail even commands that never touch a block.
+	var store blockstore.Store
+	if len(args) > 0 && args[0] == "commit" {
+		var err error
+		store, err = openStore(*backend, *storePath)
+		if err != nil {
+			return err
+		}
+		// Always released: run() returns (executing defers) before main calls
+		// os.Exit, and deferred calls also run during panic unwinding.
+		defer store.Close()
 	}
-	defer store.Close()
 
 	ctx := context.Background()
-	db, err := repo.Open(ctx, *dbURL, store)
+	db, err := repo.Open(ctx, *dbURL, store) // store is nil for metadata-only subcommands
 	if err != nil {
 		return err
 	}
@@ -108,7 +125,14 @@ subcommands:
 func openStore(backend, path string) (blockstore.Store, error) {
 	switch backend {
 	case "badger":
-		return blockstore.NewBadgerStore(path)
+		// cairn-fs is a single-user CLI, so it skips Badger's directory LOCK.
+		// On Windows an interrupted `go run` can orphan a child that keeps the
+		// LOCK handle alive, making every later run fail with "process cannot
+		// access the file". Bypassing is safe for one-shot CLI use — but do NOT
+		// point cairn-fs at a store directory a running cairn-server is using
+		// (two writers on one Badger directory corrupt it; the server keeps the
+		// lock guard for exactly that reason).
+		return blockstore.NewBadgerStore(path, blockstore.WithBypassLockGuard())
 	case "fs":
 		return blockstore.NewFSStore(path)
 	default:
