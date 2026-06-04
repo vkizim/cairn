@@ -26,6 +26,11 @@ type Config struct {
 	MaxJSONBytes   int64         // cap on JSON request bodies
 	MaxChunkBytes  int64         // cap on a single PATCH upload chunk
 	MaxUploadBytes int64         // cap on a single upload's total size
+
+	// Static serves non-/api routes (the embedded SPA). When nil, a small
+	// "frontend not built" notice is returned. Wired by cmd/cairn-server from the
+	// web package when built with -tags embed_spa.
+	Static http.Handler
 }
 
 func (c Config) withDefaults() Config {
@@ -82,6 +87,19 @@ func (s *Server) Handler() http.Handler {
 	return s.recoverMW(root)
 }
 
+// staticHandler returns the configured SPA handler, or a friendly notice when no
+// frontend is embedded (e.g. a backend-only `go run` in dev, where the SPA is
+// served by the Vite dev server instead).
+func (s *Server) staticHandler() http.Handler {
+	if s.cfg.Static != nil {
+		return s.cfg.Static
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "frontend not built; run the Vite dev server (npm run dev) "+
+			"or build with -tags embed_spa", http.StatusNotFound)
+	})
+}
+
 func (s *Server) routes(mux *http.ServeMux) {
 	// Auth.
 	mux.HandleFunc("POST /api/login", s.handleLogin)
@@ -105,11 +123,3 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/libraries/{id}/uploads/{uploadId}", s.libWrite(s.handleDeleteUpload))
 }
 
-// staticHandler is the SPA fall-through hook. Today it returns 404 for non-API
-// paths; in step 4 this is where an embed.FS-backed file server (with SPA
-// index.html fallback) gets mounted. No frontend assets exist yet.
-func (s *Server) staticHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
-	})
-}
