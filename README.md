@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="web/public/logo.png" alt="Cairn" width="180" />
+</p>
+
 # Cairn
 
 Content-addressable file storage in the spirit of Seafile.

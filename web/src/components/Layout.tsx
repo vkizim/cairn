@@ -11,7 +11,8 @@ export function Layout({ children }: { children: ReactNode }) {
   return (
     <div className="flex h-full flex-col">
       <header className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3">
-        <Link to="/libraries" className="text-lg font-semibold tracking-tight">
+        <Link to="/libraries" className="flex items-center gap-2 text-lg font-semibold tracking-tight">
+          <img src="/logo.png" alt="" className="h-7 w-7 rounded-md" />
           Cairn
         </Link>
         <div className="flex items-center gap-3">
