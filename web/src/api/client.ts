@@ -20,33 +20,44 @@ export function setUnauthorizedHandler(fn: () => void): void {
 
 const MUTATING = new Set(['POST', 'PATCH', 'PUT', 'DELETE'])
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = {}
-  let payload: BodyInit | undefined
+export interface RawInit {
+  headers?: Record<string, string>
+  body?: BodyInit
+  signal?: AbortSignal
+}
 
-  if (body !== undefined) {
-    headers['Content-Type'] = 'application/json'
-    payload = JSON.stringify(body)
-  }
-
-  // CSRF: double-submit. Attach the readable cairn_csrf cookie as a header on
-  // every mutating request; GET/HEAD omit it. Centralized so no call site forgets.
+// rawFetch is the single transport every call goes through: it always sends the
+// HttpOnly session cookie (credentials) and attaches the CSRF double-submit
+// header on every mutating request — JSON and raw-Blob bodies alike — so no
+// call site can forget either. A 401 funnels into the unauthorized handler.
+export async function rawFetch(method: string, path: string, init: RawInit = {}): Promise<Response> {
+  const headers: Record<string, string> = { ...(init.headers ?? {}) }
   if (MUTATING.has(method)) {
     const csrf = readCookie('cairn_csrf')
     if (csrf) headers['X-CSRF-Token'] = csrf
   }
-
   const resp = await fetch(path, {
     method,
     headers,
-    body: payload,
-    credentials: 'include', // send the HttpOnly session cookie
+    body: init.body,
+    credentials: 'include',
+    signal: init.signal,
   })
-
   if (resp.status === 401) {
     unauthorizedHandler?.()
     throw new ApiError(401, 'Not authenticated')
   }
+  return resp
+}
+
+// request is the JSON wrapper over rawFetch.
+export async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const init: RawInit = {}
+  if (body !== undefined) {
+    init.headers = { 'Content-Type': 'application/json' }
+    init.body = JSON.stringify(body)
+  }
+  const resp = await rawFetch(method, path, init)
   if (!resp.ok) {
     throw new ApiError(resp.status, await errorMessage(resp))
   }
@@ -57,7 +68,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return undefined as T
 }
 
-async function errorMessage(resp: Response): Promise<string> {
+export async function errorMessage(resp: Response): Promise<string> {
   try {
     const data = (await resp.json()) as { error?: string }
     if (data?.error) return data.error

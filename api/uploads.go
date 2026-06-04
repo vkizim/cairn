@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -133,37 +134,100 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if up.DeclaredSize != nil && *up.DeclaredSize != up.ReceivedBytes {
-		writeError(w, http.StatusBadRequest, "received bytes do not match declared size")
+	// A single complete is just a batch of one (merged semantics).
+	s.completeSessions(w, r, lib, []repo.UploadSession{up})
+}
+
+// maxBatchComplete bounds how many upload sessions one batch-complete may join.
+const maxBatchComplete = 256
+
+type completeBatchRequest struct {
+	UploadIDs []string `json:"upload_ids"`
+}
+
+// handleCompleteBatch joins several finished upload sessions into ONE merged
+// commit — a multi-file drag-and-drop lands as a single commit instead of N.
+func (s *Server) handleCompleteBatch(w http.ResponseWriter, r *http.Request) {
+	lib := libraryFromContext(r.Context())
+
+	var req completeBatchRequest
+	if err := s.decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(req.UploadIDs) == 0 || len(req.UploadIDs) > maxBatchComplete {
+		writeError(w, http.StatusBadRequest, "upload_ids must contain between 1 and 256 entries")
 		return
 	}
 
-	f, err := os.Open(up.TempPath)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "upload data unavailable")
-		return
+	sessions := make([]repo.UploadSession, 0, len(req.UploadIDs))
+	seenPath := map[string]bool{}
+	for _, raw := range req.UploadIDs {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "upload not found")
+			return
+		}
+		up, err := s.db.GetUploadSession(r.Context(), id, lib.ID)
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "upload not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		p := joinVirtual(up.TargetPath, up.Filename)
+		if seenPath[p] {
+			writeError(w, http.StatusBadRequest, "duplicate target path in batch: "+p)
+			return
+		}
+		seenPath[p] = true
+		sessions = append(sessions, up)
 	}
-	defer f.Close()
+	s.completeSessions(w, r, lib, sessions)
+}
 
-	// Reassembled path = target dir + filename. CommitFiles runs the bytes
-	// through the CDC chunker (ingest.Build), stores blocks, and advances the
-	// head + path_index in its atomic transaction. One upload = one file = one
-	// commit today; CommitFiles already takes a SET, so batching multiple files
-	// into one commit is a clean future extension (it will also amortize the
-	// O(library) path_index rebuild).
-	commitPath := joinVirtual(up.TargetPath, up.Filename)
-	input := repo.FileInput{Path: commitPath, Reader: io.LimitReader(f, up.ReceivedBytes)}
+// completeSessions validates the sessions, runs their assembled temp files
+// through the CDC chunker, and lands them all as ONE merged commit
+// (repo.CommitFilesMerged): the head tree plus these files, where an existing
+// path gets a NEW VERSION (the previous one stays reachable through history —
+// no "file(1)" copies). On success the sessions and temp files are cleaned up.
+func (s *Server) completeSessions(w http.ResponseWriter, r *http.Request, lib repo.Library, sessions []repo.UploadSession) {
+	inputs := make([]repo.FileInput, 0, len(sessions))
+	for _, up := range sessions {
+		if up.DeclaredSize != nil && *up.DeclaredSize != up.ReceivedBytes {
+			writeError(w, http.StatusBadRequest,
+				"received bytes do not match declared size for "+up.Filename)
+			return
+		}
+		f, err := os.Open(up.TempPath)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "upload data unavailable for "+up.Filename)
+			return
+		}
+		defer f.Close()
+		inputs = append(inputs, repo.FileInput{
+			Path:   joinVirtual(up.TargetPath, up.Filename),
+			Reader: io.LimitReader(f, up.ReceivedBytes),
+		})
+	}
 
-	res, err := s.db.CommitFiles(r.Context(), lib.ID, []repo.FileInput{input}, "upload "+up.Filename)
+	desc := "upload " + sessions[0].Filename
+	if len(sessions) > 1 {
+		desc = fmt.Sprintf("upload %d files", len(sessions))
+	}
+
+	res, err := s.db.CommitFilesMerged(r.Context(), lib.ID, inputs, desc)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "commit failed")
 		return
 	}
 
-	// Clean up temp file + session row (tolerant of an already-missing file).
-	if delErr := s.db.DeleteUploadSession(r.Context(), up); delErr != nil {
-		// Non-fatal: the commit succeeded; the sweep will reclaim the row/temp.
-		_ = delErr
+	// Clean up sessions + temp files (tolerant of already-missing files);
+	// non-fatal on error — the commit succeeded and the sweep reclaims leftovers.
+	for _, up := range sessions {
+		_ = s.db.DeleteUploadSession(r.Context(), up)
 	}
 
 	writeJSON(w, http.StatusOK, completeUploadResponse{

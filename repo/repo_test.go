@@ -296,7 +296,7 @@ func TestWriteOrderInvariant(t *testing.T) {
 	lib := mustLibrary(t, db)
 	ctx := context.Background()
 
-	prep, err := db.prepareCommit(ctx, lib, []FileInput{file("a.txt", "hello")}, "crash-between")
+	prep, err := db.prepareCommit(ctx, lib, []FileInput{file("a.txt", "hello")}, "crash-between", false)
 	if err != nil {
 		t.Fatalf("prepareCommit: %v", err)
 	}
@@ -326,6 +326,133 @@ func TestWriteOrderInvariant(t *testing.T) {
 	}
 	if gc.OrphanCommitsDeleted != 1 {
 		t.Fatalf("GC deleted %d orphan commits, want 1", gc.OrphanCommitsDeleted)
+	}
+}
+
+// mergedCommit is the CommitFilesMerged counterpart of the commit() helper.
+func mergedCommit(t *testing.T, db *DB, libID uuid.UUID, desc string, inputs ...FileInput) CommitResult {
+	t.Helper()
+	res, err := db.CommitFilesMerged(context.Background(), libID, inputs, desc)
+	if err != nil {
+		t.Fatalf("CommitFilesMerged(%q): %v", desc, err)
+	}
+	return res
+}
+
+// TestMergedCommitPreservesExistingFiles is the regression test for the
+// snapshot-wipe bug: committing a single file into a NON-EMPTY library via
+// CommitFilesMerged must keep every pre-existing file visible in the new head's
+// path_index — not just the uploaded one.
+func TestMergedCommitPreservesExistingFiles(t *testing.T) {
+	db := newTestDB(t)
+	lib := mustLibrary(t, db)
+	ctx := context.Background()
+
+	// Non-empty base: two files, one nested.
+	commit(t, db, lib.ID, "base", file("a.txt", "alpha"), file("docs/b.txt", "beta"))
+
+	// Merged single-file upload must ADD, not replace the snapshot.
+	mergedCommit(t, db, lib.ID, "upload c", file("c.txt", "gamma"))
+
+	if got := listNames(t, db, lib.ID, "/"); !eqStrings(got, []string{"a.txt", "c.txt", "docs"}) {
+		t.Fatalf("after merged upload root = %v, want [a.txt c.txt docs] (pre-existing files must survive)", got)
+	}
+	if got := listNames(t, db, lib.ID, "/docs"); !eqStrings(got, []string{"b.txt"}) {
+		t.Fatalf("/docs = %v, want [b.txt]", got)
+	}
+
+	// Same-path upload = NEW VERSION: the entry is replaced, not duplicated.
+	mergedCommit(t, db, lib.ID, "new version of a.txt", file("a.txt", "ALPHA-version-2"))
+
+	if got := listNames(t, db, lib.ID, "/"); !eqStrings(got, []string{"a.txt", "c.txt", "docs"}) {
+		t.Fatalf("after version upload root = %v (no duplicates, nothing lost)", got)
+	}
+	fr, err := db.OpenFile(ctx, lib.ID, "/a.txt")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	if fr.Size() != int64(len("ALPHA-version-2")) {
+		t.Fatalf("a.txt size = %d, want the v2 size %d", fr.Size(), len("ALPHA-version-2"))
+	}
+
+	// History: base + 2 merged commits, all chained.
+	hist, err := db.History(ctx, lib.ID)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(hist) != 3 {
+		t.Fatalf("history length %d, want 3", len(hist))
+	}
+}
+
+// TestMergedRefcountSymmetry verifies the refcount contract for merged commits
+// with SHARED blocks: tx1 must increment every distinct block of the new tree
+// (carried-over ∪ new), symmetric to what GC decrements — otherwise rolling
+// back and GC'ing the merged commit would reclaim a block still referenced by
+// the ancestor head.
+func TestMergedRefcountSymmetry(t *testing.T) {
+	db := newTestDB(t)
+	lib := mustLibrary(t, db)
+	ctx := context.Background()
+
+	hShared := blockstore.HashData([]byte("hello")) // block of f1 AND f3
+	hUnique := blockstore.HashData([]byte("world")) // block only in the merged commit
+
+	// Commit A: f1.txt -> block hShared.
+	cA := mergedCommit(t, db, lib.ID, "A", file("f1.txt", "hello"))
+	if n, _ := db.BlockRefcount(ctx, hShared); n != 1 {
+		t.Fatalf("after A: shared refcount %d, want 1", n)
+	}
+
+	// Merged commit B: carries f1 over, adds f2 (unique block) and f3 (whose
+	// content equals f1 -> shares hShared between a carried and a new file).
+	mergedCommit(t, db, lib.ID, "B", file("f2.txt", "world"), file("f3.txt", "hello"))
+
+	// B's tree references {hShared, hUnique}; each distinct block counted ONCE
+	// per commit: hShared = A(1) + B(1) = 2, hUnique = 1.
+	if n, _ := db.BlockRefcount(ctx, hShared); n != 2 {
+		t.Fatalf("after B: shared refcount %d, want 2 (carried-over block must be counted)", n)
+	}
+	if n, _ := db.BlockRefcount(ctx, hUnique); n != 1 {
+		t.Fatalf("after B: unique refcount %d, want 1", n)
+	}
+
+	// Roll back to A and GC the orphaned B. GC decrements B's FULL tree —
+	// symmetry means hShared survives at 1 and is NOT deleted from the store.
+	if err := db.RollbackHead(ctx, lib.ID, &cA.Commit.Hash); err != nil {
+		t.Fatalf("RollbackHead: %v", err)
+	}
+	gc, err := db.GarbageCollect(ctx, lib.ID)
+	if err != nil {
+		t.Fatalf("GarbageCollect: %v", err)
+	}
+	if gc.OrphanCommitsDeleted != 1 {
+		t.Fatalf("GC deleted %d orphans, want 1", gc.OrphanCommitsDeleted)
+	}
+
+	if n, _ := db.BlockRefcount(ctx, hShared); n != 1 {
+		t.Fatalf("after GC: shared refcount %d, want 1 (ancestor still references it)", n)
+	}
+	if ok, _ := db.store.Exists(db.ns, hShared); !ok {
+		t.Fatal("shared block was deleted from the store while ancestor head references it — refcount asymmetry!")
+	}
+	if n, _ := db.BlockRefcount(ctx, hUnique); n != 0 {
+		t.Fatalf("after GC: unique refcount %d, want 0", n)
+	}
+	if ok, _ := db.store.Exists(db.ns, hUnique); ok {
+		t.Fatal("unique block should have been reclaimed")
+	}
+
+	// The surviving head must be fully consistent.
+	report, err := db.Fsck(ctx, lib.ID)
+	if err != nil {
+		t.Fatalf("Fsck: %v", err)
+	}
+	if !report.HeadConsistent {
+		t.Fatalf("head inconsistent after rollback+GC: %v", report.Problems)
+	}
+	if got := listNames(t, db, lib.ID, "/"); !eqStrings(got, []string{"f1.txt"}) {
+		t.Fatalf("root after rollback = %v, want [f1.txt]", got)
 	}
 }
 

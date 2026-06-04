@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,13 +55,36 @@ type preparedCommit struct {
 //
 // A crash between tx1 and tx2 leaves an orphan commit (reclaimed by GC) but never
 // a head pointing at a missing commit.
+//
+// SNAPSHOT semantics: the new commit's tree is built from EXACTLY the given
+// inputs — files present in the head but absent from inputs disappear from the
+// new head (they stay reachable through history). This is what the cairn-fs CLI
+// wants ("commit this directory" = full snapshot). For incremental additions
+// (web upload), use CommitFilesMerged.
 func (db *DB) CommitFiles(ctx context.Context, libID uuid.UUID, inputs []FileInput, description string) (CommitResult, error) {
+	return db.commitFiles(ctx, libID, inputs, description, false)
+}
+
+// CommitFilesMerged commits inputs ON TOP of the library's current head: the new
+// commit's tree is the head tree with the inputs overlaid. An input whose path
+// already exists REPLACES that entry — the path gets a new version, and the
+// previous file object stays reachable through the parent commit (no "file(1)"
+// copies). Files not mentioned in inputs are carried over unchanged. With no
+// head it behaves exactly like CommitFiles.
+//
+// This is the semantics the web upload uses; one batch of uploads = one merged
+// commit. Rules A/B/C are identical to CommitFiles (same tx1/tx2 path).
+func (db *DB) CommitFilesMerged(ctx context.Context, libID uuid.UUID, inputs []FileInput, description string) (CommitResult, error) {
+	return db.commitFiles(ctx, libID, inputs, description, true)
+}
+
+func (db *DB) commitFiles(ctx context.Context, libID uuid.UUID, inputs []FileInput, description string, mergeWithHead bool) (CommitResult, error) {
 	lib, err := db.GetLibrary(ctx, libID)
 	if err != nil {
 		return CommitResult{}, err
 	}
 
-	prep, err := db.prepareCommit(ctx, lib, inputs, description)
+	prep, err := db.prepareCommit(ctx, lib, inputs, description, mergeWithHead)
 	if err != nil {
 		return CommitResult{}, err
 	}
@@ -75,8 +99,10 @@ func (db *DB) CommitFiles(ctx context.Context, libID uuid.UUID, inputs []FileInp
 
 // prepareCommit runs the chunker over each input (writing blocks to the store),
 // builds the file and tree objects, and computes the commit hash. It performs NO
-// metadata writes.
-func (db *DB) prepareCommit(ctx context.Context, lib Library, inputs []FileInput, description string) (preparedCommit, error) {
+// metadata writes. With mergeWithHead, the head commit's files are carried over
+// into the new tree (inputs override matching paths) and their blocks join the
+// refcount set.
+func (db *DB) prepareCommit(ctx context.Context, lib Library, inputs []FileInput, description string, mergeWithHead bool) (preparedCommit, error) {
 	prep := preparedCommit{
 		libID:  lib.ID,
 		parent: lib.HeadCommit,
@@ -106,7 +132,16 @@ func (db *DB) prepareCommit(ctx context.Context, lib Library, inputs []FileInput
 		prep.stats.PhysicalNewBytes += st.PhysicalNewBytes
 		prep.stats.TotalBlocks += st.TotalBlocks
 	}
+	// Stats reflect the NEW inputs only (the upload), even when merging.
 	prep.stats.UniqueBlocks = len(prep.blocks)
+
+	if mergeWithHead && lib.HeadCommit != nil {
+		carried, err := db.carriedHeadFiles(ctx, *lib.HeadCommit, files, prep.blocks)
+		if err != nil {
+			return preparedCommit{}, err
+		}
+		files = append(carried, files...)
+	}
 
 	rootTree, treeObjs, err := buildTrees(files)
 	if err != nil {
@@ -131,6 +166,76 @@ func (db *DB) prepareCommit(ctx context.Context, lib Library, inputs []FileInput
 	commit.Hash = commitHash
 	prep.commit = commit
 	return prep, nil
+}
+
+// carriedHeadFiles loads the head commit's file entries, drops those whose path
+// is overridden by a new input (the override = a new version of that path), and
+// returns the survivors. The survivors' blocks are merged into blocks — the
+// commit's refcount set.
+//
+// REFCOUNT SYMMETRY (critical): tx1 must increment EVERY distinct block of the
+// new tree — carried-over and newly-ingested alike — because GarbageCollect
+// decrements by walking a commit's FULL tree. If only the new manifests were
+// counted, rolling back and GC'ing this commit would decrement carried-over
+// blocks that were never incremented for it, potentially driving a block still
+// referenced by an ancestor head to refcount 0 and deleting it from the store.
+func (db *DB) carriedHeadFiles(ctx context.Context, headHash blockstore.Hash, newFiles []committedFile, blocks map[blockstore.Hash]int64) ([]committedFile, error) {
+	override := make(map[string]bool, len(newFiles))
+	for _, f := range newFiles {
+		rel, err := normalizeRelPath(f.path)
+		if err != nil {
+			return nil, err
+		}
+		override[rel] = true
+	}
+
+	head, err := db.getCommit(ctx, db.pool, headHash)
+	if err != nil {
+		return nil, fmt.Errorf("repo: load head for merge: %w", err)
+	}
+
+	var carried []committedFile
+	err = walkTree(ctx, db.pool, head.RootTree, func(parentPath string, e TreeEntry) error {
+		if e.Type != ObjTypeFile {
+			return nil
+		}
+		rel := strings.TrimPrefix(joinPath(parentPath, e.Name), "/")
+		if override[rel] {
+			return nil // replaced by a new version from inputs
+		}
+		carried = append(carried, committedFile{path: rel, objHash: e.Hash, size: e.Size})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Merge the survivors' blocks into the refcount set (see symmetry note).
+	for _, cf := range carried {
+		_, content, err := loadObject(ctx, db.pool, cf.objHash)
+		if err != nil {
+			return nil, fmt.Errorf("repo: load carried file object %s: %w", cf.objHash, err)
+		}
+		fo, err := decodeFileObject(content)
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range fo.Blocks {
+			blocks[b.Hash] = b.Size
+		}
+	}
+	return carried, nil
+}
+
+// normalizeRelPath cleans a repository path into the canonical relative form
+// walkTree produces ("docs/a.txt"), so override matching can't miss on
+// formatting differences.
+func normalizeRelPath(p string) (string, error) {
+	comps, err := splitPath(p)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(comps, "/"), nil
 }
 
 // commitObjects is tx1: insert all file and tree objects, then the commit row,

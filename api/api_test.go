@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"testing"
@@ -433,6 +434,204 @@ func TestRangeDownload(t *testing.T) {
 	if !bytes.Equal(got, content[100:200]) {
 		t.Fatalf("range bytes mismatch (got %d bytes)", len(got))
 	}
+}
+
+// completeSingle finishes one upload session via the single-complete endpoint.
+func (c *client) completeSingle(t *testing.T, libID, uploadID string) {
+	t.Helper()
+	resp := c.req(http.MethodPost, "/api/libraries/"+libID+"/uploads/"+uploadID+"/complete", nil, true, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("complete status %d", resp.StatusCode)
+	}
+}
+
+// uploadOne creates a session, sends content in one chunk (none for empty), and
+// returns the upload id WITHOUT completing it.
+func (c *client) uploadOne(t *testing.T, libID, dir, name string, content []byte) string {
+	t.Helper()
+	uploadID, st := c.createUpload(t, libID, dir, name, nil)
+	if st != http.StatusCreated {
+		t.Fatalf("create upload %q: status %d", name, st)
+	}
+	if len(content) > 0 {
+		resp := c.patch(t, libID, uploadID, 0, content)
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("patch %q: status %d", name, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	return uploadID
+}
+
+func (c *client) commitCount(t *testing.T, libID string) int {
+	t.Helper()
+	resp := c.req(http.MethodGet, "/api/libraries/"+libID+"/commits", nil, false, nil)
+	defer resp.Body.Close()
+	var commits []map[string]any
+	decode(t, resp, &commits)
+	return len(commits)
+}
+
+// TestUploadMergePreservesExisting is the API-level regression test for the
+// snapshot-wipe bug: a second upload into a now-NON-EMPTY library must keep the
+// first file visible in the head listing.
+func TestUploadMergePreservesExisting(t *testing.T) {
+	e := newTestEnv(t)
+	e.seedUser(t, "alice", "pw")
+	c := e.newClient(t)
+	c.login("alice", "pw").Body.Close()
+	libID := mustLibrary(t, c, "lib")
+
+	c.completeSingle(t, libID, c.uploadOne(t, libID, "/", "first.txt", []byte("first")))
+	c.completeSingle(t, libID, c.uploadOne(t, libID, "/", "second.txt", []byte("second")))
+
+	resp := c.req(http.MethodGet, "/api/libraries/"+libID+"/files?path=/", nil, false, nil)
+	var entries []struct {
+		Name string `json:"name"`
+	}
+	decode(t, resp, &entries)
+	resp.Body.Close()
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name
+	}
+	if len(names) != 2 {
+		t.Fatalf("root after two uploads = %v, want BOTH files (snapshot-wipe regression)", names)
+	}
+}
+
+func TestBatchUploadOneCommit(t *testing.T) {
+	e := newTestEnv(t)
+	e.seedUser(t, "alice", "pw")
+	c := e.newClient(t)
+	c.login("alice", "pw").Body.Close()
+	libID := mustLibrary(t, c, "lib")
+
+	// Pre-existing content so the batch must merge, not wipe.
+	c.completeSingle(t, libID, c.uploadOne(t, libID, "/", "existing.txt", []byte("keep me")))
+	before := c.commitCount(t, libID)
+
+	ids := []string{
+		c.uploadOne(t, libID, "/", "one.bin", deterministicBytes(1024, 1)),
+		c.uploadOne(t, libID, "/docs", "two.bin", deterministicBytes(2048, 2)),
+		c.uploadOne(t, libID, "/", "three.bin", deterministicBytes(512, 3)),
+	}
+	b, _ := json.Marshal(map[string]any{"upload_ids": ids})
+	resp := c.req(http.MethodPost, "/api/libraries/"+libID+"/uploads/complete-batch",
+		bytes.NewReader(b), true, map[string]string{"Content-Type": "application/json"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("complete-batch status %d", resp.StatusCode)
+	}
+	var cr struct {
+		Files int `json:"files"`
+	}
+	decode(t, resp, &cr)
+	resp.Body.Close()
+	if cr.Files != 3 {
+		t.Fatalf("batch files = %d, want 3", cr.Files)
+	}
+
+	// Exactly ONE new commit for the whole batch.
+	if after := c.commitCount(t, libID); after != before+1 {
+		t.Fatalf("commits went %d -> %d, want exactly one new commit for the batch", before, after)
+	}
+
+	// Everything visible: pre-existing + all three batch files.
+	if got := listingNames(t, c, libID, "/"); !eqStrings(got, []string{"docs", "existing.txt", "one.bin", "three.bin"}) {
+		t.Fatalf("root = %v", got)
+	}
+	if got := listingNames(t, c, libID, "/docs"); !eqStrings(got, []string{"two.bin"}) {
+		t.Fatalf("/docs = %v", got)
+	}
+}
+
+// TestDuplicateNameCreatesNewVersion: uploading an existing filename replaces
+// the path entry (a new version via the commit) — no "file(1)" copies, and the
+// previous version stays reachable through history.
+func TestDuplicateNameCreatesNewVersion(t *testing.T) {
+	e := newTestEnv(t)
+	e.seedUser(t, "alice", "pw")
+	c := e.newClient(t)
+	c.login("alice", "pw").Body.Close()
+	libID := mustLibrary(t, c, "lib")
+
+	v1 := []byte("version one")
+	v2 := []byte("the second, longer version")
+	c.completeSingle(t, libID, c.uploadOne(t, libID, "/", "report.txt", v1))
+	before := c.commitCount(t, libID)
+	c.completeSingle(t, libID, c.uploadOne(t, libID, "/", "report.txt", v2))
+
+	// One entry, with the v2 content; one more commit in history.
+	if got := listingNames(t, c, libID, "/"); !eqStrings(got, []string{"report.txt"}) {
+		t.Fatalf("root = %v, want exactly one report.txt (no copies)", got)
+	}
+	resp := c.req(http.MethodGet, "/api/libraries/"+libID+"/files/download?path=/report.txt", nil, false, nil)
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Equal(got, v2) {
+		t.Fatalf("download = %q, want the new version", got)
+	}
+	if after := c.commitCount(t, libID); after != before+1 {
+		t.Fatalf("history did not grow by one (old version must stay reachable)")
+	}
+}
+
+func TestEmptyFileUpload(t *testing.T) {
+	e := newTestEnv(t)
+	e.seedUser(t, "alice", "pw")
+	c := e.newClient(t)
+	c.login("alice", "pw").Body.Close()
+	libID := mustLibrary(t, c, "lib")
+
+	// 0 bytes: no PATCH at all, straight to complete.
+	c.completeSingle(t, libID, c.uploadOne(t, libID, "/", "empty.txt", nil))
+
+	resp := c.req(http.MethodGet, "/api/libraries/"+libID+"/files?path=/", nil, false, nil)
+	var entries []struct {
+		Name string `json:"name"`
+		Size int64  `json:"size"`
+	}
+	decode(t, resp, &entries)
+	resp.Body.Close()
+	if len(entries) != 1 || entries[0].Name != "empty.txt" || entries[0].Size != 0 {
+		t.Fatalf("listing = %+v, want empty.txt with size 0", entries)
+	}
+
+	dl := c.req(http.MethodGet, "/api/libraries/"+libID+"/files/download?path=/empty.txt", nil, false, nil)
+	body, _ := io.ReadAll(dl.Body)
+	dl.Body.Close()
+	if dl.StatusCode != http.StatusOK || len(body) != 0 {
+		t.Fatalf("empty download: status %d, %d bytes", dl.StatusCode, len(body))
+	}
+}
+
+func listingNames(t *testing.T, c *client, libID, dir string) []string {
+	t.Helper()
+	resp := c.req(http.MethodGet, "/api/libraries/"+libID+"/files?path="+dir, nil, false, nil)
+	defer resp.Body.Close()
+	var entries []struct {
+		Name string `json:"name"`
+	}
+	decode(t, resp, &entries)
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name
+	}
+	sort.Strings(names)
+	return names
+}
+
+func eqStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestPathValidationRejectsTraversal(t *testing.T) {

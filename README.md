@@ -17,7 +17,10 @@ Content-addressable file storage in the spirit of Seafile.
   Range, and a resumable upload protocol — served by `cmd/cairn-server`.
 - **Step 4a** — the web UI shell (`web/`): a Vite + React + TypeScript SPA
   (login → libraries → virtualized file manager → download), embedded into the
-  binary. Upload and history/rollback come in 4b.
+  binary.
+- **Step 4b** — upload in the web UI: drag-and-drop + file picker, resumable
+  chunked transfer with per-file progress and cancel, one merged commit per
+  batch. History/rollback come in 4c.
 
 No encryption yet.
 
@@ -336,3 +339,40 @@ so client-side routing survives refresh and deep links.
 TypeScript strict; `npm run lint` (eslint flat config), `npm run format`
 (prettier), `npm run test` (vitest). `web/node_modules` and `web/dist` are
 gitignored — build locally or in CI; `dist` is not committed.
+
+## Step 4b — upload in the web UI
+
+Drag-and-drop onto the file manager (highlighted drop zone) or the **Upload**
+button (multi-select picker). Uploads target the directory currently open.
+
+- **Resumable chunked transfer** over the step-3 protocol: 8 MiB `Blob.slice`
+  chunks PATCHed sequentially per file (`Upload-Offset` cursor), ≤2 files in
+  parallel. The file is never read into memory whole. Progress counts only
+  server-acknowledged bytes. On a transient failure the client backs off,
+  re-syncs via `HEAD` (the server's authoritative offset), and resumes — never
+  restarts a file. `409` re-syncs instantly; `413` fails that file with a clear
+  message while the rest of the queue continues. Per-file cancel aborts the
+  in-flight request and `DELETE`s the session. 0-byte files upload with no
+  chunks at all.
+- **One batch = one commit.** All files of a drop/selection complete together
+  through `POST .../uploads/complete-batch`, landing as a single merged commit
+  (`repo.CommitFilesMerged`): the head tree plus the uploads. Files that failed
+  or were cancelled are excluded; the successful remainder still forms one
+  commit.
+- **Merged commits (and the snapshot-wipe fix).** The single `complete` also
+  uses merge semantics now: uploading into a non-empty library ADDS to the head
+  tree instead of replacing it (the old behavior would have wiped every other
+  file from the listing). `repo.CommitFiles` keeps full-snapshot semantics for
+  the CLI. Refcount symmetry is preserved: a merged commit increments every
+  distinct block of its full tree — carried-over and new alike — exactly what GC
+  decrements, so rollback + GC of a merged commit can never reclaim a block an
+  ancestor still references (covered by `TestMergedRefcountSymmetry`).
+- **Duplicate filename = new version.** Uploading a name that already exists in
+  the target directory replaces the path entry in the new commit; the previous
+  version stays reachable through history. No "file(1)" copies, single and
+  batch alike.
+- Filenames are validated client-side (mirror of `repo.ValidateFilename`)
+  before any byte is sent; the backend re-validates.
+- Known 4b limitation: the upload queue lives with the file-manager page —
+  navigating away abandons in-flight uploads (their sessions expire and are
+  reclaimed by the sweep).

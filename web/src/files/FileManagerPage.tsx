@@ -10,6 +10,10 @@ import { Breadcrumb } from './Breadcrumb'
 import { FullSpinner } from '../components/Spinner'
 import { ErrorBanner } from '../components/ErrorBanner'
 import { EmptyState } from '../components/EmptyState'
+import { Button } from '../components/Button'
+import { DropZone } from '../upload/DropZone'
+import { UploadPanel } from '../upload/UploadPanel'
+import { useUploadQueue } from '../upload/useUploadQueue'
 
 const ROW_HEIGHT = 36
 
@@ -20,6 +24,8 @@ export function FileManagerPage() {
   const navigate = useNavigate()
 
   const { data, isLoading, isError, error } = useFiles(libraryId, path)
+  const uploads = useUploadQueue(libraryId)
+  const pickerRef = useRef<HTMLInputElement>(null)
 
   // Directories first, then by name.
   const entries = useMemo(() => {
@@ -39,38 +45,60 @@ export function FileManagerPage() {
   const openDir = (childPath: string) =>
     navigate(`/libraries/${libraryId}/files/${pathToSplat(childPath)}`)
 
+  // Uploads always target the directory open at drop/pick time.
+  const enqueueHere = (files: File[]) => uploads.enqueue(files, path)
+
   return (
     <div className="flex h-full flex-col gap-3">
-      <Breadcrumb libraryId={libraryId} path={path} />
+      <div className="flex items-center justify-between gap-3">
+        <Breadcrumb libraryId={libraryId} path={path} />
+        <Button onClick={() => pickerRef.current?.click()}>Upload</Button>
+        <input
+          ref={pickerRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            enqueueHere(Array.from(e.target.files ?? []))
+            e.target.value = '' // allow re-picking the same files
+          }}
+        />
+      </div>
 
-      {isLoading ? (
-        <FullSpinner />
-      ) : isError ? (
-        <ErrorBanner message={error instanceof ApiError ? error.message : 'Failed to load files.'} />
-      ) : entries.length === 0 ? (
-        <EmptyState title="This folder is empty" />
-      ) : (
-        <div
-          ref={scrollRef}
-          className="flex-1 overflow-auto rounded-lg border border-slate-200 bg-white"
-        >
-          <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
-            {virtualizer.getVirtualItems().map((vi) => {
-              const entry = entries[vi.index] as PathEntry
-              return (
-                <Row
-                  key={vi.key}
-                  entry={entry}
-                  offset={vi.start}
-                  libraryId={libraryId}
-                  dir={path}
-                  onOpenDir={openDir}
-                />
-              )
-            })}
+      <DropZone label={`Drop files to upload to ${path}`} onFiles={enqueueHere}>
+        {isLoading ? (
+          <FullSpinner />
+        ) : isError ? (
+          <ErrorBanner
+            message={error instanceof ApiError ? error.message : 'Failed to load files.'}
+          />
+        ) : entries.length === 0 ? (
+          <EmptyState title="This folder is empty" hint="Drag files here or use Upload." />
+        ) : (
+          <div
+            ref={scrollRef}
+            className="flex-1 overflow-auto rounded-lg border border-slate-200 bg-white"
+          >
+            <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+              {virtualizer.getVirtualItems().map((vi) => {
+                const entry = entries[vi.index] as PathEntry
+                return (
+                  <Row
+                    key={vi.key}
+                    entry={entry}
+                    offset={vi.start}
+                    libraryId={libraryId}
+                    dir={path}
+                    onOpenDir={openDir}
+                  />
+                )
+              })}
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </DropZone>
+
+      <UploadPanel items={uploads.items} onCancel={uploads.cancel} onClear={uploads.clearFinished} />
     </div>
   )
 }
