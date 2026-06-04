@@ -22,12 +22,30 @@ type BadgerStore struct {
 // compile-time check that BadgerStore satisfies the full Store interface.
 var _ Store = (*BadgerStore)(nil)
 
+// BadgerOption customizes how the Badger store is opened.
+type BadgerOption func(*badger.Options)
+
+// WithBypassLockGuard opens Badger without acquiring the directory LOCK file.
+//
+// ONLY safe when the caller can guarantee no other process has the same
+// directory open — two processes writing one Badger directory corrupt it.
+// Long-running servers must NOT use this (the lock guard is their protection
+// against double-starts). It exists for single-user CLI tools on Windows, where
+// an interrupted `go run` can leave an orphaned child holding the LOCK handle
+// and every subsequent run fails with "process cannot access the file".
+func WithBypassLockGuard() BadgerOption {
+	return func(o *badger.Options) { *o = o.WithBypassLockGuard(true) }
+}
+
 // NewBadgerStore opens (creating if needed) a Badger-backed block store at dir.
-func NewBadgerStore(dir string) (*BadgerStore, error) {
+func NewBadgerStore(dir string, options ...BadgerOption) (*BadgerStore, error) {
 	if dir == "" {
 		return nil, errors.New("blockstore: BadgerStore dir must not be empty")
 	}
 	opts := badger.DefaultOptions(dir).WithLogger(noopLogger{})
+	for _, apply := range options {
+		apply(&opts)
+	}
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("blockstore: open badger at %q: %w", dir, err)

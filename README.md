@@ -68,6 +68,14 @@ LIB=$(./cairn-fs -backend fs -store ./store create-library photos alice)
 A second `commit` of an overlapping fileset reuses blocks (physical-new bytes
 stay small) and chains onto the previous commit.
 
+Only `commit` opens the block store (`-store`/`-backend` matter just for it);
+`create-library`, `ls`, `log`, and `fsck` are metadata-only and talk solely to
+Postgres. For `commit`, `cairn-fs` opens Badger with the directory lock guard
+bypassed — fine for a single-user CLI, and it sidesteps Windows LOCK conflicts
+from interrupted `go run` children — but do **not** point `commit` at a store
+directory a running `cairn-server` is actively using (the server keeps the lock
+guard precisely to prevent two writers).
+
 ### Running the tests
 
 The step-1 packages need no database. The `repo` tests pick their Postgres in
