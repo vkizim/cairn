@@ -39,6 +39,31 @@ export function parentPath(path: string): string {
   return segs.length === 0 ? '/' : '/' + segs.join('/')
 }
 
+// validateFilename mirrors the backend's repo.ValidateFilename so invalid names
+// are rejected client-side with a clear message BEFORE any upload starts.
+// Returns null when valid, or a human-readable reason.
+export function validateFilename(name: string): string | null {
+  if (name.length === 0 || name.trim().length === 0) {
+    return 'File name is empty'
+  }
+  if (/[/\\]/.test(name)) {
+    return 'File name must not contain path separators'
+  }
+  if (name === '.' || name === '..') {
+    return `"${name}" is not a valid file name`
+  }
+  if (name.length > 255) {
+    return 'File name is too long (max 255 characters)'
+  }
+  for (const ch of name) {
+    const code = ch.codePointAt(0) ?? 0
+    if (code < 0x20 || code === 0x7f) {
+      return 'File name contains control characters'
+    }
+  }
+  return null
+}
+
 export interface Crumb {
   name: string
   path: string

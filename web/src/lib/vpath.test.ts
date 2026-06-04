@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { pathToSplat, splatToPath, joinPath, breadcrumbs, parentPath } from './vpath'
+import {
+  pathToSplat,
+  splatToPath,
+  joinPath,
+  breadcrumbs,
+  parentPath,
+  validateFilename,
+} from './vpath'
 
 // These names exercise spaces, Cyrillic, and URL-reserved characters. The
 // per-segment encode/decode contract must round-trip them losslessly between
@@ -48,5 +55,20 @@ describe('vpath per-segment round-trip', () => {
     const splat = pathToSplat(path)
     expect(splat).toBe('100%25%20done')
     expect(splatToPath(splat)).toBe(path)
+  })
+})
+
+describe('validateFilename (mirror of repo.ValidateFilename)', () => {
+  it('accepts normal and tricky-but-legal names', () => {
+    for (const name of ['report.pdf', 'отчёт #2.docx', '100% done', 'a?b', 'x&y']) {
+      expect(validateFilename(name)).toBeNull()
+    }
+  })
+
+  it('rejects invalid names with a reason', () => {
+    const bad = ['', '   ', 'a/b', 'a\\b', '.', '..', 'x'.repeat(256), 'tab\tname', '\u0007bell']
+    for (const name of bad) {
+      expect(validateFilename(name), `name ${JSON.stringify(name)}`).not.toBeNull()
+    }
   })
 })

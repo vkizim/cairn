@@ -115,8 +115,11 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/libraries/{id}/commits", s.libRead(s.handleCommits))
 	mux.HandleFunc("GET /api/libraries/{id}/fsck", s.libRead(s.handleFsck))
 
-	// Resumable uploads (writes).
+	// Resumable uploads (writes). complete-batch lands N finished sessions as
+	// ONE merged commit (no path conflict with the {uploadId} routes — different
+	// segment counts).
 	mux.HandleFunc("POST /api/libraries/{id}/uploads", s.libWrite(s.handleCreateUpload))
+	mux.HandleFunc("POST /api/libraries/{id}/uploads/complete-batch", s.libWrite(s.handleCompleteBatch))
 	mux.HandleFunc("HEAD /api/libraries/{id}/uploads/{uploadId}", s.libRead(s.handleHeadUpload))
 	mux.HandleFunc("PATCH /api/libraries/{id}/uploads/{uploadId}", s.libWrite(s.handlePatchUpload))
 	mux.HandleFunc("POST /api/libraries/{id}/uploads/{uploadId}/complete", s.libWrite(s.handleCompleteUpload))
