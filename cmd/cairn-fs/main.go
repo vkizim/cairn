@@ -8,8 +8,8 @@
 // Flags (must precede the subcommand):
 //
 //	-db      Postgres DSN (default: $CAIRN_TEST_DATABASE_URL, or from .env)
-//	-store   block store directory (default ./cairn-store; used by `commit` only)
-//	-backend block store backend: badger|fs (default badger; used by `commit` only)
+//	-store   block store directory (default ./cairn-store; used by `commit`/`fsck`)
+//	-backend block store backend: badger|fs (default badger; used by `commit`/`fsck`)
 //
 // Subcommands:
 //
@@ -19,10 +19,11 @@
 //	log <library-id>                print commit history (newest first)
 //	fsck <library-id>               verify the library and print a report
 //
-// Only `commit` opens the block store (it writes blocks); the other subcommands
-// are metadata-only and need just Postgres. For `commit`, Badger is opened with
-// the lock guard bypassed — fine for this single-user CLI, but do not point it
-// at a store directory a running cairn-server is actively using.
+// Only `commit` (writes blocks) and `fsck` (verifies block presence) open the
+// block store; the other subcommands are metadata-only and need just Postgres.
+// When the store is opened, Badger's lock guard is bypassed — fine for this
+// single-user CLI, but do not point it at a store directory a running
+// cairn-server is actively using.
 package main
 
 import (
@@ -63,14 +64,15 @@ func run() error {
 		return fmt.Errorf("no database configured: pass -db or set CAIRN_TEST_DATABASE_URL (e.g. in .env)")
 	}
 
-	// Only `commit` writes blocks; every other subcommand (create-library, ls,
-	// log, fsck) is metadata-only and talks just to Postgres, so the block store
-	// is not opened at all for them. This sidesteps Badger's directory LOCK for
-	// read-only use — on Windows a concurrent cairn-server (or an orphaned
-	// `go run` child surviving a Ctrl-C) holding ./cairn-store would otherwise
-	// fail even commands that never touch a block.
+	// Only `commit` (writes blocks) and `fsck` (verifies block presence — rule C)
+	// touch the block store; create-library/ls/log are metadata-only and talk
+	// just to Postgres, so the store is not opened at all for them. This
+	// sidesteps Badger's directory LOCK for metadata use — on Windows a
+	// concurrent cairn-server (or an orphaned `go run` child surviving a Ctrl-C)
+	// holding ./cairn-store would otherwise fail even commands that never touch
+	// a block.
 	var store blockstore.Store
-	if len(args) > 0 && args[0] == "commit" {
+	if len(args) > 0 && (args[0] == "commit" || args[0] == "fsck") {
 		var err error
 		store, err = openStore(*backend, *storePath)
 		if err != nil {
